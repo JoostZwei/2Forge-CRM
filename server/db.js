@@ -1,16 +1,12 @@
-const Datastore = require('@seald-io/nedb');
-const path = require('path');
+const { neon } = require('@neondatabase/serverless');
 
-// On Fly.io DATA_DIR=/data (persistent volume); locally falls back to server/data/
-const dir = process.env.DATA_DIR || path.join(__dirname, 'data');
-require('fs').mkdirSync(dir, { recursive: true });
+// local dev: učitaj .env
+try { require('dotenv').config({ path: require('path').join(__dirname, '../.env') }); } catch {}
 
-const ds = (name) => new Datastore({ filename: path.join(dir, `${name}.db`), autoload: true });
+if (!process.env.DATABASE_URL) {
+  console.error('ERROR: DATABASE_URL nije postavljen. Dodaj ga u .env fajl.');
+}
 
-module.exports = {
-  companies: ds('companies'),
-  contacts: ds('contacts'),
-  deals: ds('deals'),
-  tasks: ds('tasks'),
-  notes: ds('notes'),
-};
+const sql = neon(process.env.DATABASE_URL || '');
+
+module.exports = { sql };

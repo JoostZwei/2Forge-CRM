@@ -1,5 +1,7 @@
 node_modules/
 client/node_modules/
 server/node_modules/
+.env
 
-# NE isključujemo client/dist ni server/data — Glitch ih treba
+# client/dist se commitira (Vercel ga koristi)
+# server/data se NE commitira (podaci su u Neon bazi)
