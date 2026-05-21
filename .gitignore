@@ -1,0 +1,5 @@
+node_modules/
+client/node_modules/
+server/node_modules/
+
+# NE isključujemo client/dist ni server/data — Glitch ih treba

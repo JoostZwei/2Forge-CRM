@@ -1,0 +1,12 @@
+{
+  "name": "2forge-crm",
+  "version": "1.0.0",
+  "description": "2Forge CRM",
+  "scripts": {
+    "start": "node server/index.js",
+    "postinstall": "cd server && npm install"
+  },
+  "engines": {
+    "node": "20.x"
+  }
+}
