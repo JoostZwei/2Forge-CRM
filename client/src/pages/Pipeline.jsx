@@ -615,6 +615,16 @@ export default function Pipeline() {
         .vl-del:hover{background:#FEF2F2;color:#EF4444}
         .vl-new{padding:8px 12px;cursor:pointer;font-size:13px;color:#2563EB;font-weight:600;border-top:1px solid #F1F5F9;transition:background .1s}
         .vl-new:hover{background:#EFF6FF}
+        @media(max-width:767px){
+          .c2,.c3{grid-template-columns:1fr!important}
+          .mo{padding:0;align-items:flex-end}
+          .modal{border-radius:20px 20px 0 0!important;max-width:100%!important;margin:0!important;width:100%!important}
+          .mbody{max-height:72vh;padding:14px 14px}
+          .mhdr{padding:14px 14px 10px}
+          .mftr{padding:10px 14px}
+          .fsec-t{font-size:10px}
+          .finput,.fselect,.ftarea{font-size:16px}
+        }
       `}</style>
 
       {/* Stats bar */}

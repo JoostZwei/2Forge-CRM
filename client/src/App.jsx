@@ -37,11 +37,11 @@ const IcoTasks = () => (
 );
 
 const NAV = [
-  { id: 'dashboard', label: 'Nadzorna ploča', Icon: IcoDashboard },
-  { id: 'contacts',  label: 'Kontakti',       Icon: IcoContacts  },
-  { id: 'companies', label: 'Tvrtke',          Icon: IcoCompanies },
-  { id: 'pipeline',  label: 'Pipeline',        Icon: IcoPipeline  },
-  { id: 'tasks',     label: 'Zadaci',          Icon: IcoTasks     },
+  { id: 'dashboard', label: 'Nadzorna ploča', short: 'Ploča',    Icon: IcoDashboard },
+  { id: 'contacts',  label: 'Kontakti',       short: 'Kontakti', Icon: IcoContacts  },
+  { id: 'companies', label: 'Tvrtke',         short: 'Tvrtke',   Icon: IcoCompanies },
+  { id: 'pipeline',  label: 'Pipeline',       short: 'Pipeline', Icon: IcoPipeline  },
+  { id: 'tasks',     label: 'Zadaci',         short: 'Zadaci',   Icon: IcoTasks     },
 ];
 
 const PAGES = { dashboard: Dashboard, contacts: Contacts, companies: Companies, pipeline: Pipeline, tasks: Tasks };
@@ -70,6 +70,19 @@ export default function App() {
       <main className="main">
         <Page />
       </main>
+      {/* Mobile bottom navigation */}
+      <nav className="mobile-nav">
+        {NAV.map(({ id, short, Icon }) => (
+          <div
+            key={id}
+            className={`mobile-nav-item${page === id ? ' active' : ''}`}
+            onClick={() => setPage(id)}
+          >
+            <Icon />
+            <span>{short}</span>
+          </div>
+        ))}
+      </nav>
     </div>
   );
 }

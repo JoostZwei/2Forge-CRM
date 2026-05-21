@@ -318,3 +318,110 @@ tr:hover td { background: #F8FAFC; }
 .deal-card-title { font-weight: 600; font-size: 13px; margin-bottom: 4px; }
 .deal-card-meta { font-size: 11px; color: #94A3B8; }
 .deal-card-value { font-weight: 700; color: #2563EB; font-size: 13px; margin-top: 6px; }
+
+/* ── Hover effects samo na uređajima koji ih podržavaju (ne touch) ─────────── */
+@media (hover: hover) {
+  .btn:hover { transform: translateY(-1px); box-shadow: 0 4px 14px rgba(0,0,0,.14); }
+  .btn-primary:hover { background: #1D4ED8; }
+  .btn-danger:hover  { background: #DC2626; }
+  .btn-ghost:hover   { background: #F8FAFC; border-color: #CBD5E1; box-shadow: none; transform: none; }
+}
+@media (hover: none) {
+  .btn:hover { transform: none; box-shadow: none; }
+}
+
+/* ── Mobile bottom navigation ───────────────────────────────────────────────── */
+.mobile-nav {
+  display: none;
+  position: fixed;
+  bottom: 0; left: 0; right: 0;
+  background: #0F172A;
+  border-top: 1px solid rgba(255,255,255,.07);
+  z-index: 50;
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+.mobile-nav-item {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  padding: 8px 2px 6px;
+  cursor: pointer;
+  color: #475569;
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+  transition: color .15s;
+  -webkit-tap-highlight-color: transparent;
+  user-select: none;
+}
+.mobile-nav-item.active { color: #60A5FA; }
+.mobile-nav-item svg { margin-bottom: 1px; }
+
+/* ── Mobile (≤ 767px) ───────────────────────────────────────────────────────── */
+@media (max-width: 767px) {
+  .sidebar        { display: none; }
+  .mobile-nav     { display: flex; }
+
+  .main {
+    margin-left: 0 !important;
+    padding: 14px 12px 76px !important;
+    width: 100%;
+  }
+
+  .page-header    { margin-bottom: 14px; }
+  .page-header h1 { font-size: 18px; letter-spacing: -.2px; }
+
+  .stats-grid {
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+    margin-bottom: 16px;
+  }
+  .stat-card    { padding: 14px 14px; }
+  .stat-value   { font-size: 22px; }
+  .stat-label   { font-size: 10px; }
+
+  .card { border-radius: 10px; }
+
+  th  { padding: 9px 10px; }
+  td  { padding: 10px 10px; font-size: 13px; }
+
+  .search-bar { margin-bottom: 14px; }
+
+  .form-row   { grid-template-columns: 1fr !important; }
+
+  /* Modal — slide up from bottom */
+  .modal-overlay {
+    align-items: flex-end;
+    padding: 0;
+  }
+  .modal {
+    border-radius: 20px 20px 0 0;
+    max-height: 90vh;
+    padding: 20px 18px;
+    max-width: 100% !important;
+    margin: 0;
+  }
+  .modal h2 { font-size: 16px; margin-bottom: 16px; }
+
+  .task-item { padding: 12px 14px; }
+
+  .btn        { padding: 8px 14px; font-size: 13px; }
+  .btn-sm     { padding: 5px 10px; font-size: 11px; }
+  .action-row { gap: 4px; }
+
+  .empty { padding: 36px 16px; }
+
+  /* Spriječi auto-zoom na Android/iOS pri fokusu inputa */
+  input, textarea, select { font-size: 16px; }
+}
+
+/* ── Tablet (768–1024px) ─────────────────────────────────────────────────────── */
+@media (min-width: 768px) and (max-width: 1024px) {
+  .sidebar { width: 200px; }
+  .main    { margin-left: 200px; padding: 20px 16px; }
+  .stats-grid { grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; }
+}
