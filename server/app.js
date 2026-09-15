@@ -11,6 +11,18 @@ const newId = () => Math.random().toString(36).slice(2, 10) + Date.now().toStrin
 const n     = v => (v === undefined || v === '') ? null : v;   // null coerce
 const b     = v => !!v;                                         // boolean coerce
 
+// Stages koji podrazumijevaju da je ponuda vec izasla van tvrtke
+const OFFER_STAGES = new Set([
+  'Ponuda poslana', 'Sastanak dogovoren', 'Sastanak odrzan',
+  'Pregovori', 'Ugovor potpisan', 'Dobiveno',
+]);
+// Stages koji se racunaju kao zatvoreni (ne ulaze u otvoreni pipeline)
+const CLOSED_STAGES = new Set(['Izgubljeno', 'Diskvalificiran', 'Ugovor potpisan', 'Dobiveno']);
+
+function requiresOib(d) {
+  return b(d.ponuda_poslana) || OFFER_STAGES.has(d.stage);
+}
+
 // ── join helpers ──────────────────────────────────────────────────────────────
 async function withCompany(rows) {
   if (!rows.length) return rows;
@@ -107,6 +119,9 @@ app.post('/api/deals', async (req, res) => {
   try {
     const d = req.body;
     if (!d.title) return res.status(400).json({ error: 'Title required' });
+    if (requiresOib(d) && !n(d.oib)) {
+      return res.status(400).json({ error: 'OIB je obavezan prije nego ponuda izađe iz tvrtke.' });
+    }
     const id = newId();
     await sql`INSERT INTO deals
       (id,title,stage,value,contact_id,company_id,
@@ -115,7 +130,9 @@ app.post('/api/deals', async (req, res) => {
        upitnik_poslan,datum_upitnika,upitnik_vracen,datum_vracanja,
        ponuda_poslana,datum_ponude,datum_sastanka,
        slj_korak,datum_slj_koraka,proc_volumen,
-       razlog_gubitka,komentar,prospekt_id,created_at)
+       razlog_gubitka,komentar,prospekt_id,created_at,
+       vrijednost_jednokratno,tip_posla,oib,pravni_subjekt,
+       datum_zadnje_komunikacije,smjer_zadnje_komunikacije,na_potezu,valjanost_ponude)
       VALUES
       (${id},${n(d.title)},${n(d.stage)||'lead'},${parseFloat(d.value)||0},${n(d.contact_id)},${n(d.company_id)},
        ${n(d.datum_upita)},${n(d.tvrtka)},${n(d.ime_kontakta)},${n(d.email)},${n(d.telefon)},
@@ -123,7 +140,9 @@ app.post('/api/deals', async (req, res) => {
        ${b(d.upitnik_poslan)},${n(d.datum_upitnika)},${b(d.upitnik_vracen)},${n(d.datum_vracanja)},
        ${b(d.ponuda_poslana)},${n(d.datum_ponude)},${n(d.datum_sastanka)},
        ${n(d.slj_korak)},${n(d.datum_slj_koraka)},${n(d.proc_volumen)},
-       ${n(d.razlog_gubitka)},${n(d.komentar)},${n(d.prospekt_id)},${now()})`;
+       ${n(d.razlog_gubitka)},${n(d.komentar)},${n(d.prospekt_id)},${now()},
+       ${parseFloat(d.vrijednost_jednokratno)||0},${n(d.tip_posla)||'recurring'},${n(d.oib)},${n(d.pravni_subjekt)},
+       ${n(d.datum_zadnje_komunikacije)},${n(d.smjer_zadnje_komunikacije)},${n(d.na_potezu)},${n(d.valjanost_ponude)})`;
     res.json({ id });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -131,6 +150,9 @@ app.post('/api/deals', async (req, res) => {
 app.put('/api/deals/:id', async (req, res) => {
   try {
     const d = req.body;
+    if (requiresOib(d) && !n(d.oib)) {
+      return res.status(400).json({ error: 'OIB je obavezan prije nego ponuda izađe iz tvrtke.' });
+    }
     await sql`UPDATE deals SET
       title=${n(d.title)},stage=${n(d.stage)},value=${parseFloat(d.value)||0},
       contact_id=${n(d.contact_id)},company_id=${n(d.company_id)},
@@ -142,7 +164,11 @@ app.put('/api/deals/:id', async (req, res) => {
       ponuda_poslana=${b(d.ponuda_poslana)},datum_ponude=${n(d.datum_ponude)},
       datum_sastanka=${n(d.datum_sastanka)},slj_korak=${n(d.slj_korak)},
       datum_slj_koraka=${n(d.datum_slj_koraka)},proc_volumen=${n(d.proc_volumen)},
-      razlog_gubitka=${n(d.razlog_gubitka)},komentar=${n(d.komentar)}
+      razlog_gubitka=${n(d.razlog_gubitka)},komentar=${n(d.komentar)},
+      vrijednost_jednokratno=${parseFloat(d.vrijednost_jednokratno)||0},tip_posla=${n(d.tip_posla)||'recurring'},
+      oib=${n(d.oib)},pravni_subjekt=${n(d.pravni_subjekt)},
+      datum_zadnje_komunikacije=${n(d.datum_zadnje_komunikacije)},smjer_zadnje_komunikacije=${n(d.smjer_zadnje_komunikacije)},
+      na_potezu=${n(d.na_potezu)},valjanost_ponude=${n(d.valjanost_ponude)}
       WHERE id=${req.params.id}`;
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -150,7 +176,14 @@ app.put('/api/deals/:id', async (req, res) => {
 
 app.patch('/api/deals/:id/stage', async (req, res) => {
   try {
-    await sql`UPDATE deals SET stage=${req.body.stage} WHERE id=${req.params.id}`;
+    const newStage = req.body.stage;
+    if (OFFER_STAGES.has(newStage)) {
+      const [deal] = await sql`SELECT oib FROM deals WHERE id=${req.params.id}`;
+      if (!deal || !n(deal.oib)) {
+        return res.status(400).json({ error: 'OIB je obavezan prije nego ponuda izađe iz tvrtke.' });
+      }
+    }
+    await sql`UPDATE deals SET stage=${newStage} WHERE id=${req.params.id}`;
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -244,11 +277,13 @@ app.get('/api/stats', async (req, res) => {
     const [contacts, companies, deals, tasks] = await Promise.all([
       sql`SELECT COUNT(*) FROM contacts`,
       sql`SELECT COUNT(*) FROM companies`,
-      sql`SELECT id, stage, value FROM deals`,
+      sql`SELECT id, stage, value, vrijednost_jednokratno FROM deals`,
       sql`SELECT COUNT(*) FROM tasks WHERE done = false`,
     ]);
-    const openDeals     = deals.filter(d => d.stage !== 'won' && d.stage !== 'lost').length;
-    const pipelineValue = deals.filter(d => d.stage !== 'lost').reduce((s,d) => s + (parseFloat(d.value)||0), 0);
+    const openDealRows   = deals.filter(d => !CLOSED_STAGES.has(d.stage));
+    const openDeals      = openDealRows.length;
+    const pipelineValue  = openDealRows.reduce((s,d) =>
+      s + (parseFloat(d.value)||0) + (parseFloat(d.vrijednost_jednokratno)||0), 0);
     res.json({
       contacts:      parseInt(contacts[0].count),
       companies:     parseInt(companies[0].count),

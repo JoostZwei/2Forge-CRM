@@ -53,8 +53,12 @@ export default function App() {
   return (
     <div className="layout">
       <aside className="sidebar">
-        <div className="sidebar-logo">2Forge<span> CRM</span></div>
+        <div className="sidebar-logo">
+          <div className="sidebar-logo-mark">2F</div>
+          <div className="sidebar-logo-text">2Forge<span>CRM Workspace</span></div>
+        </div>
         <nav>
+          <div className="nav-section-label">Izbornik</div>
           {NAV.map(({ id, label, Icon }) => (
             <div
               key={id}

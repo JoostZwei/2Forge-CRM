@@ -10,6 +10,8 @@ const SC = {
   'Sastanak dogovoren':      { bg:'#F7FEE7', cl:'#3F6212', dt:'#84CC16' },
   'Sastanak odrzan':         { bg:'#F0FDF4', cl:'#14532D', dt:'#22C55E' },
   'Pregovori':               { bg:'#FFF7ED', cl:'#9A3412', dt:'#F97316' },
+  'Ugovor potpisan':         { bg:'#ECFDF5', cl:'#065F46', dt:'#10B981' },
+  'Dobiveno':                { bg:'#F0FDF4', cl:'#166534', dt:'#16A34A' },
   'Izgubljeno':              { bg:'#FEF2F2', cl:'#7F1D1D', dt:'#EF4444' },
   'Diskvalificiran':         { bg:'#F8FAFC', cl:'#334155', dt:'#64748B' },
 };
@@ -22,12 +24,22 @@ const SL = {
   'Sastanak dogovoren':      'Sastanak dogovoren',
   'Sastanak odrzan':         'Sastanak održan',
   'Pregovori':               'Pregovori',
+  'Ugovor potpisan':         'Ugovor potpisan',
+  'Dobiveno':                'Dobiveno',
   'Izgubljeno':              'Izgubljeno',
   'Diskvalificiran':         'Diskvalificiran',
 };
 const SK = Object.keys(SC);
+// Stages kod kojih je ponuda vec izasla van tvrtke → OIB obavezan
+const OFFER_STAGES = new Set([
+  'Ponuda poslana','Sastanak dogovoren','Sastanak odrzan','Pregovori','Ugovor potpisan','Dobiveno',
+]);
+const CLOSED_STAGES = new Set(['Izgubljeno','Diskvalificiran','Ugovor potpisan','Dobiveno']);
 const IZVOR   = ['Web forma','Hladni poziv','Topli lead','Preporučena','Sajam','Drugo'];
 const TIPOVI  = ['fulfilment','MTU','mikro-skladištenje','skladištenje i transport','skladištenje','najam skladišnog prostora','B2B dedicated'];
+const TIP_POSLA_L = { recurring:'Recurring (mjesečno)', jednokratni:'Jednokratni projekt' };
+const NA_POTEZU_L = { mi:'Mi', klijent:'Klijent' };
+const SMJER_L = { mi_klijent:'Mi → klijent', klijent_mi:'Klijent → mi' };
 const VL_DEFAULTS = ['Wanda','Matija'];
 const LS_CUSTOM  = 'crm_vlasnici_custom';
 const LS_DELETED = 'crm_vlasnici_deleted';
@@ -46,6 +58,10 @@ const RAZLOZI = ['Ne pružamo uslugu','Nema kapaciteta','Klijent nije odgovorio'
 
 function sc(k) { return SC[k] || { bg:'#F1F5F9', cl:'#475569', dt:'#94A3B8' }; }
 function sl(k) { return SL[k] || k; }
+// Relevantna vrijednost s obzirom na tip posla (recurring €/mj vs jednokratni €)
+function dealValue(d) {
+  return d.tip_posla === 'jednokratni' ? (parseFloat(d.vrijednost_jednokratno) || 0) : (parseFloat(d.value) || 0);
+}
 
 function toInputDate(s) {
   if (!s) return '';
@@ -62,6 +78,20 @@ function dsort(s, fallback = 0) {
   if (!s) return fallback;
   const p = s.split('.');
   return p.length < 3 ? fallback : parseInt(p[2])*10000 + parseInt(p[1])*100 + parseInt(p[0]);
+}
+function parseDMY(s) {
+  if (!s) return null;
+  const p = s.split('.');
+  if (p.length !== 3) return null;
+  const d = new Date(parseInt(p[2]), parseInt(p[1]) - 1, parseInt(p[0]));
+  return isNaN(d.getTime()) ? null : d;
+}
+// Dana od zadnjeg kontakta: koristi datum zadnje komunikacije, a tek ako ga nema pada natrag na datum upita
+function daysSinceContact(deal) {
+  const d = parseDMY(deal.datum_zadnje_komunikacije) || parseDMY(deal.datum_upita);
+  if (!d) return null;
+  const diff = Math.floor((Date.now() - d.getTime()) / 86400000);
+  return diff < 0 ? 0 : diff;
 }
 
 // ── Status badge with inline dropdown ────────────────────────────────────────
@@ -194,28 +224,45 @@ function VlasnikDropdown({ value, onChange, vlasnici, onAdd, onDelete }) {
 // ── Modal ─────────────────────────────────────────────────────────────────────
 const EMPTY = {
   datum_upita:'', tvrtka:'', ime_kontakta:'', email:'', telefon:'',
-  izvor_leada:'', tip_usluge:'', stage:'Novi upit', vlasnik:'',
+  oib:'', pravni_subjekt:'',
+  izvor_leada:'', tip_usluge:'', stage:'Novi upit', vlasnik:'', na_potezu:'',
   upitnik_poslan:false, datum_upitnika:'', upitnik_vracen:false, datum_vracanja:'',
-  ponuda_poslana:false, datum_ponude:'', datum_sastanka:'',
+  ponuda_poslana:false, datum_ponude:'', valjanost_ponude:'', datum_sastanka:'',
+  datum_zadnje_komunikacije:'', smjer_zadnje_komunikacije:'',
   slj_korak:'', datum_slj_koraka:'', proc_volumen:'', value:'',
+  tip_posla:'recurring', vrijednost_jednokratno:'',
   razlog_gubitka:'', komentar:'',
 };
 
 function Modal({ deal, onSave, onClose, onDelete, vlasnici, onAddVlasnik, onDeleteVlasnik }) {
   const isNew = !deal?.id;
   const today = () => { const d = new Date(); return `${String(d.getDate()).padStart(2,'0')}.${String(d.getMonth()+1).padStart(2,'0')}.${d.getFullYear()}`; };
-  const [f, setF] = useState(isNew ? { ...EMPTY, datum_upita: today() } : { ...EMPTY, ...deal, value: deal.value || '' });
+  const [f, setF] = useState(isNew
+    ? { ...EMPTY, datum_upita: today() }
+    : { ...EMPTY, ...deal, value: deal.value || '', vrijednost_jednokratno: deal.vrijednost_jednokratno || '' });
+  const [err, setErr] = useState('');
   const set = (k, v) => setF(prev => ({ ...prev, [k]: v }));
   const showRazlog = f.stage === 'Izgubljeno' || f.stage === 'Diskvalificiran';
+  const oibRequired = !!f.ponuda_poslana || OFFER_STAGES.has(f.stage);
+  const oibMissing = oibRequired && !String(f.oib || '').trim();
 
   const submit = async (e) => {
     e.preventDefault();
     if (!f.stage) return;
+    if (oibMissing) {
+      setErr('OIB je obavezan prije nego ponuda izađe iz tvrtke — upiši OIB ili makni kvačicu "Ponuda poslana" / vrati status prije slanja ponude.');
+      return;
+    }
     const payload = { ...f, value: parseFloat(f.value) || 0,
+      vrijednost_jednokratno: parseFloat(f.vrijednost_jednokratno) || 0,
       title: f.tvrtka || f.ime_kontakta || 'Novi unos' };
-    if (isNew) await api.createDeal(payload);
-    else await api.updateDeal(deal.id, payload);
-    onSave();
+    try {
+      if (isNew) await api.createDeal(payload);
+      else await api.updateDeal(deal.id, payload);
+      onSave();
+    } catch (e2) {
+      setErr(e2.message || 'Greška pri spremanju.');
+    }
   };
 
   return (
@@ -227,6 +274,13 @@ function Modal({ deal, onSave, onClose, onDelete, vlasnici, onAddVlasnik, onDele
         </div>
         <form onSubmit={submit}>
           <div className="mbody">
+
+            {err && (
+              <div style={{ background:'#FEF2F2', border:'1px solid #FECACA', color:'#B91C1C',
+                borderRadius:8, padding:'10px 14px', fontSize:13, fontWeight:600 }}>
+                ⚠️ {err}
+              </div>
+            )}
 
             {/* Osnovno */}
             <div className="fsec">
@@ -268,6 +322,21 @@ function Modal({ deal, onSave, onClose, onDelete, vlasnici, onAddVlasnik, onDele
                   <input className="finput" placeholder="+385..." value={f.telefon || ''} onChange={e => set('telefon', e.target.value)} />
                 </div>
               </div>
+              <div className="frow c2">
+                <div className="fg">
+                  <div className="flabel">
+                    OIB {oibRequired && <span style={{ color:'#EF4444', marginLeft:2 }}>*</span>}
+                  </div>
+                  <input className="finput" inputMode="numeric" maxLength={11} placeholder="11 znamenki"
+                    style={oibMissing ? { borderColor:'#EF4444', background:'#FEF2F2' } : undefined}
+                    value={f.oib || ''} onChange={e => set('oib', e.target.value.replace(/[^0-9]/g,'').slice(0,11))} />
+                </div>
+                <div className="fg">
+                  <div className="flabel">Pravni subjekt</div>
+                  <input className="finput" placeholder="Puni registrirani naziv (d.o.o. / j.d.o.o. / obrt...)"
+                    value={f.pravni_subjekt || ''} onChange={e => set('pravni_subjekt', e.target.value)} />
+                </div>
+              </div>
             </div>
 
             {/* Status i vlasnik */}
@@ -287,6 +356,16 @@ function Modal({ deal, onSave, onClose, onDelete, vlasnici, onAddVlasnik, onDele
                   onAdd={onAddVlasnik}
                   onDelete={onDeleteVlasnik}
                 />
+              </div>
+              <div className="frow c2">
+                <div className="fg">
+                  <div className="flabel">Tko je na potezu</div>
+                  <select className="fselect" value={f.na_potezu || ''} onChange={e => set('na_potezu', e.target.value)}>
+                    <option value="">— odaberi —</option>
+                    <option value="mi">Mi (mi trebamo odgovoriti/nastaviti)</option>
+                    <option value="klijent">Klijent (čekamo njihov odgovor)</option>
+                  </select>
+                </div>
               </div>
             </div>
 
@@ -321,7 +400,21 @@ function Modal({ deal, onSave, onClose, onDelete, vlasnici, onAddVlasnik, onDele
                 <DateField label="Datum slanja ponude" value={f.datum_ponude} onChange={v => set('datum_ponude', v)} />
               </div>
               <div className="frow c2">
+                <DateField label="Valjanost ponude (do)" value={f.valjanost_ponude} onChange={v => set('valjanost_ponude', v)} />
                 <DateField label="Datum sastanka" value={f.datum_sastanka} onChange={v => set('datum_sastanka', v)} />
+              </div>
+              <div className="frow c2">
+                <DateField label="Datum zadnje komunikacije" value={f.datum_zadnje_komunikacije} onChange={v => set('datum_zadnje_komunikacije', v)} />
+                <div className="fg">
+                  <div className="flabel">Smjer zadnje komunikacije</div>
+                  <select className="fselect" value={f.smjer_zadnje_komunikacije || ''} onChange={e => set('smjer_zadnje_komunikacije', e.target.value)}>
+                    <option value="">— odaberi —</option>
+                    <option value="mi_klijent">Mi → klijent (mi smo zadnji pisali)</option>
+                    <option value="klijent_mi">Klijent → mi (klijent je zadnji pisao)</option>
+                  </select>
+                </div>
+              </div>
+              <div className="frow c2">
                 <DateField label="Datum sljedećeg koraka" value={f.datum_slj_koraka} onChange={v => set('datum_slj_koraka', v)} />
               </div>
               <div className="frow">
@@ -337,13 +430,28 @@ function Modal({ deal, onSave, onClose, onDelete, vlasnici, onAddVlasnik, onDele
               <div className="fsec-t">Financije</div>
               <div className="frow c2">
                 <div className="fg">
+                  <div className="flabel">Tip posla</div>
+                  <select className="fselect" value={f.tip_posla || 'recurring'} onChange={e => set('tip_posla', e.target.value)}>
+                    {Object.entries(TIP_POSLA_L).map(([k,l]) => <option key={k} value={k}>{l}</option>)}
+                  </select>
+                </div>
+                <div className="fg">
                   <div className="flabel">Proc. mj. volumen (paketa)</div>
                   <input className="finput" type="number" min="0" placeholder="0" value={f.proc_volumen || ''} onChange={e => set('proc_volumen', e.target.value)} />
                 </div>
-                <div className="fg">
-                  <div className="flabel">Proc. vrijednost (EUR/mj)</div>
-                  <input className="finput" type="number" min="0" placeholder="0" value={f.value} onChange={e => set('value', e.target.value)} />
-                </div>
+              </div>
+              <div className="frow c2">
+                {f.tip_posla === 'jednokratni' ? (
+                  <div className="fg">
+                    <div className="flabel">Vrijednost jednokratnog projekta (EUR)</div>
+                    <input className="finput" type="number" min="0" placeholder="0" value={f.vrijednost_jednokratno} onChange={e => set('vrijednost_jednokratno', e.target.value)} />
+                  </div>
+                ) : (
+                  <div className="fg">
+                    <div className="flabel">Proc. vrijednost (EUR/mj)</div>
+                    <input className="finput" type="number" min="0" placeholder="0" value={f.value} onChange={e => set('value', e.target.value)} />
+                  </div>
+                )}
               </div>
             </div>
 
@@ -417,6 +525,7 @@ export default function Pipeline() {
   const [search, setSearch] = useState('');
   const [ownerF, setOwnerF] = useState('');
   const [tipF, setTipF]     = useState('');
+  const [potezuF, setPotezuF] = useState('');
 
   // ── Vlasnici (persisted in localStorage) ──────────────────────────────────
   const [vlCustom,  setVlCustom]  = useState(() => loadVlasnici().custom);
@@ -465,15 +574,23 @@ export default function Pipeline() {
   };
 
   const handleStatusChange = async (deal, newStage) => {
-    await api.updateDealStage(deal.id, newStage);
-    setDeals(prev => prev.map(d => d.id === deal.id ? { ...d, stage: newStage } : d));
-    showToast('Status: ' + sl(newStage));
+    try {
+      await api.updateDealStage(deal.id, newStage);
+      setDeals(prev => prev.map(d => d.id === deal.id ? { ...d, stage: newStage } : d));
+      showToast('Status: ' + sl(newStage));
+    } catch (e) {
+      showToast(e.message || 'OIB je obavezan prije nego ponuda izađe iz tvrtke.', 'err');
+    }
   };
 
   // Stats
-  const active = deals.filter(d => d.stage !== 'Izgubljeno' && d.stage !== 'Diskvalificiran').length;
-  const pipeline = deals.filter(d => d.stage !== 'Izgubljeno' && d.stage !== 'Diskvalificiran')
-    .reduce((s, d) => s + (parseFloat(d.value) || 0), 0);
+  const openList = deals.filter(d => !CLOSED_STAGES.has(d.stage));
+  const active = openList.length;
+  const pipeline = openList.reduce((s, d) =>
+    s + (parseFloat(d.value) || 0) + (parseFloat(d.vrijednost_jednokratno) || 0), 0);
+  const dobivenoValue = deals.filter(d => d.stage === 'Dobiveno' || d.stage === 'Ugovor potpisan')
+    .reduce((s, d) => s + (parseFloat(d.value) || 0) + (parseFloat(d.vrijednost_jednokratno) || 0), 0);
+  const naNama = openList.filter(d => d.na_potezu === 'mi').length;
   const byS = {};
   deals.forEach(d => { byS[d.stage] = (byS[d.stage] || 0) + 1; });
 
@@ -488,8 +605,9 @@ export default function Pipeline() {
     if (Object.keys(spills).length > 0 && !spills[d.stage]) return false;
     if (ownerF && d.vlasnik !== ownerF) return false;
     if (tipF && d.tip_usluge !== tipF) return false;
+    if (potezuF && d.na_potezu !== potezuF) return false;
     if (search) {
-      const hay = ((d.tvrtka||'')+(d.ime_kontakta||'')+(d.email||'')+(d.tip_usluge||'')+(d.stage||'')+(d.komentar||'')).toLowerCase();
+      const hay = ((d.tvrtka||'')+(d.ime_kontakta||'')+(d.email||'')+(d.tip_usluge||'')+(d.stage||'')+(d.komentar||'')+(d.oib||'')+(d.pravni_subjekt||'')).toLowerCase();
       if (!hay.includes(search.toLowerCase())) return false;
     }
     return true;
@@ -497,8 +615,12 @@ export default function Pipeline() {
 
   const sorted = [...filtered].sort((a, b) => {
     let av = a[sortKey] ?? '', bv = b[sortKey] ?? '';
-    if (sortKey === 'value' || sortKey === 'proc_volumen') {
+    if (sortKey === 'value') {
+      av = dealValue(a); bv = dealValue(b);
+    } else if (sortKey === 'proc_volumen') {
       av = parseFloat(av) || 0; bv = parseFloat(bv) || 0;
+    } else if (sortKey === 'zadnja_komunikacija') {
+      av = daysSinceContact(a) ?? -1; bv = daysSinceContact(b) ?? -1;
     } else if (sortKey === 'datum_upita') {
       // empty dates go to the end regardless of sort direction
       av = dsort(av, sortDir === 1 ? 99999999 : -1);
@@ -517,13 +639,16 @@ export default function Pipeline() {
 
   // CSV export
   const exportCSV = () => {
-    const hdrs = ['ID','Datum upita','Tvrtka','Ime kontakta','E-mail','Telefon','Izvor leada','Tip usluge','Status','Vlasnik','Upitnik poslan','Datum upitnika','Upitnik vracen','Datum vracanja','Ponuda poslana','Datum ponude','Datum sastanka','Sljedeci korak','Datum slj. koraka','Proc. volumen','Proc. vrijednost EUR/mj','Razlog gubitka','Komentar'];
+    const hdrs = ['ID','Datum upita','Tvrtka','Pravni subjekt','OIB','Ime kontakta','E-mail','Telefon','Izvor leada','Tip usluge','Status','Vlasnik','Na potezu','Upitnik poslan','Datum upitnika','Upitnik vracen','Datum vracanja','Ponuda poslana','Datum ponude','Valjanost ponude','Datum sastanka','Datum zadnje komunikacije','Smjer zadnje komunikacije','Dana bez odgovora','Sljedeci korak','Datum slj. koraka','Proc. volumen','Tip posla','Proc. vrijednost EUR/mj','Vrijednost jednokratno EUR','Razlog gubitka','Komentar'];
     const rows = [hdrs.join(',')];
     sorted.forEach((d, i) => {
-      const r = [i+1, d.datum_upita, d.tvrtka, d.ime_kontakta, d.email, d.telefon, d.izvor_leada, d.tip_usluge, sl(d.stage), d.vlasnik,
+      const r = [i+1, d.datum_upita, d.tvrtka, d.pravni_subjekt, d.oib, d.ime_kontakta, d.email, d.telefon, d.izvor_leada, d.tip_usluge, sl(d.stage), d.vlasnik,
+        NA_POTEZU_L[d.na_potezu] || '',
         d.upitnik_poslan ? 'DA' : 'NE', d.datum_upitnika, d.upitnik_vracen ? 'DA' : 'NE', d.datum_vracanja,
-        d.ponuda_poslana ? 'DA' : 'NE', d.datum_ponude, d.datum_sastanka, d.slj_korak, d.datum_slj_koraka,
-        d.proc_volumen, d.value, d.razlog_gubitka, d.komentar];
+        d.ponuda_poslana ? 'DA' : 'NE', d.datum_ponude, d.valjanost_ponude, d.datum_sastanka,
+        d.datum_zadnje_komunikacije, SMJER_L[d.smjer_zadnje_komunikacije] || '', daysSinceContact(d) ?? '',
+        d.slj_korak, d.datum_slj_koraka,
+        d.proc_volumen, TIP_POSLA_L[d.tip_posla] || '', d.value, d.vrijednost_jednokratno, d.razlog_gubitka, d.komentar];
       rows.push(r.map(v => `"${String(v||'').replace(/"/g,'""')}"`).join(','));
     });
     const blob = new Blob(['﻿' + rows.join('\r\n')], { type:'text/csv;charset=utf-8' });
@@ -538,6 +663,9 @@ export default function Pipeline() {
   return (
     <>
       <style>{`
+        .pl-stat{background:#fff;border-radius:16px;box-shadow:0 6px 20px rgba(24,39,75,.08),0 0 0 1px rgba(15,23,42,.035);position:relative;overflow:hidden;transition:transform .18s,box-shadow .18s}
+        .pl-stat::before{content:'';position:absolute;top:0;left:0;right:0;height:3px;background:linear-gradient(90deg,#2F5EFF,#7C5CFF);opacity:.9}
+        @media(hover:hover){.pl-stat:hover{transform:translateY(-2px);box-shadow:0 20px 48px rgba(24,39,75,.16)}}
         .sbadge{display:inline-flex;align-items:center;gap:5px;padding:4px 10px;border-radius:20px;font-size:11.5px;font-weight:700;white-space:nowrap;cursor:pointer}
         .sbadge:hover{opacity:.85}
         .sdot{width:7px;height:7px;border-radius:50%;flex-shrink:0}
@@ -551,7 +679,7 @@ export default function Pipeline() {
         .ow{background:#FAF5FF;color:#7C3AED}
         .om{background:#EFF6FF;color:#1D4ED8}
         .oo{background:#F0FDF4;color:#15803D}
-        .abtn{border:none;cursor:pointer;padding:0;border-radius:8px;font-size:17px;transition:all .15s;line-height:1;display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;flex-shrink:0}
+        .abtn{border:none;cursor:pointer;padding:0;border-radius:9px;font-size:17px;transition:all .15s;line-height:1;display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;flex-shrink:0}
         .abtn.edit{background:#ECFDF5;color:#16A34A}
         .abtn.edit:hover{background:#D1FAE5;color:#15803D;transform:scale(1.08)}
         .abtn.del{background:#FEF2F2;color:#DC2626}
@@ -561,49 +689,49 @@ export default function Pipeline() {
         .spill.on{border-color:currentColor}
         .cnt{background:#EFF6FF;color:#2563EB;font-size:11px;font-weight:700;padding:2px 6px;border-radius:12px;margin-left:5px}
         .fsec{display:flex;flex-direction:column;gap:11px}
-        .fsec-t{font-size:11px;font-weight:700;color:#2563EB;text-transform:uppercase;letter-spacing:.7px;padding-bottom:6px;border-bottom:2px solid #EFF6FF}
+        .fsec-t{font-size:11px;font-weight:700;color:#2F5EFF;text-transform:uppercase;letter-spacing:.7px;padding-bottom:6px;border-bottom:2px solid #EEF2FF}
         .frow{display:grid;gap:11px}
         .c2{grid-template-columns:1fr 1fr}
         .c3{grid-template-columns:1fr 1fr 1fr}
         .fg{display:flex;flex-direction:column;gap:4px}
         .flabel{font-size:12px;font-weight:600;color:#475569}
-        .finput,.fselect,.ftarea{width:100%;padding:8px 11px;border:1px solid #E2E8F0;border-radius:8px;font-size:14px;color:#0F172A;outline:none;font-family:inherit;background:#F8FAFC;transition:border-color .15s}
-        .finput:focus,.fselect:focus,.ftarea:focus{border-color:#2563EB;box-shadow:0 0 0 3px rgba(37,99,235,.1);background:#fff}
+        .finput,.fselect,.ftarea{width:100%;padding:9px 12px;border:1.5px solid #E7EBF1;border-radius:9px;font-size:14px;color:#0F172A;outline:none;font-family:inherit;background:#F8FAFC;transition:border-color .15s,box-shadow .15s}
+        .finput:focus,.fselect:focus,.ftarea:focus{border-color:#2F5EFF;box-shadow:0 0 0 4px rgba(47,94,255,.12);background:#fff}
         .ftarea{resize:vertical;min-height:68px;line-height:1.5}
-        .fchk{display:flex;align-items:center;gap:8px;padding:8px 11px;border:1px solid #E2E8F0;border-radius:8px;cursor:pointer;background:#F8FAFC;transition:all .15s}
+        .fchk{display:flex;align-items:center;gap:8px;padding:9px 12px;border:1.5px solid #E7EBF1;border-radius:9px;cursor:pointer;background:#F8FAFC;transition:all .15s}
         .fchk:hover{background:#fff;border-color:#CBD5E1}
-        .fchk input{width:15px;height:15px;cursor:pointer;accent-color:#2563EB}
+        .fchk input{width:15px;height:15px;cursor:pointer;accent-color:#2F5EFF}
         .fchk span{font-size:14px;cursor:pointer;user-select:none}
-        .mo{position:fixed;inset:0;background:rgba(15,23,42,.5);z-index:1000;display:flex;align-items:flex-start;justify-content:center;padding:24px;overflow-y:auto}
-        .modal{background:#fff;border-radius:16px;width:100%;max-width:700px;box-shadow:0 20px 60px rgba(15,23,42,.22);margin:auto}
-        .mhdr{padding:18px 22px 14px;border-bottom:1px solid #F1F5F9;display:flex;align-items:center;justify-content:space-between}
-        .mtitle{font-size:17px;font-weight:700;color:#0F172A}
+        .mo{position:fixed;inset:0;background:rgba(11,18,32,.55);backdrop-filter:blur(4px);z-index:1000;display:flex;align-items:flex-start;justify-content:center;padding:24px;overflow-y:auto}
+        .modal{background:#fff;border-radius:20px;width:100%;max-width:700px;box-shadow:0 20px 60px rgba(24,39,75,.22);margin:auto}
+        .mhdr{padding:19px 24px 15px;border-bottom:1px solid #F1F5F9;display:flex;align-items:center;justify-content:space-between}
+        .mtitle{font-size:18px;font-weight:800;color:#0F172A;letter-spacing:-.3px}
         .mclose{background:none;border:none;cursor:pointer;color:#94A3B8;font-size:20px;line-height:1;padding:4px;border-radius:6px;transition:all .15s}
         .mclose:hover{background:#F1F5F9;color:#475569}
-        .mbody{padding:22px;display:flex;flex-direction:column;gap:18px;max-height:70vh;overflow-y:auto}
-        .mftr{padding:14px 22px;border-top:1px solid #F1F5F9;display:flex;align-items:center;justify-content:flex-end;gap:10px;background:#FAFBFC;border-radius:0 0 16px 16px}
-        .btn-del{background:#FEF2F2;color:#DC2626;border:none;padding:8px 16px;border-radius:8px;font-size:13.5px;font-weight:600;cursor:pointer;margin-right:auto}
+        .mbody{padding:24px;display:flex;flex-direction:column;gap:18px;max-height:70vh;overflow-y:auto}
+        .mftr{padding:15px 24px;border-top:1px solid #F1F5F9;display:flex;align-items:center;justify-content:flex-end;gap:10px;background:#FAFBFC;border-radius:0 0 20px 20px}
+        .btn-del{background:#FEF2F2;color:#DC2626;border:none;padding:9px 16px;border-radius:9px;font-size:13.5px;font-weight:600;cursor:pointer;margin-right:auto}
         .btn-del:hover{background:#FEE2E2}
-        .btn-cancel{background:#F1F5F9;color:#475569;border:none;padding:8px 16px;border-radius:8px;font-size:13.5px;font-weight:600;cursor:pointer}
-        .btn-cancel:hover{background:#E2E8F0}
-        .btn-save{background:#2563EB;color:#fff;border:none;padding:8px 20px;border-radius:8px;font-size:13.5px;font-weight:600;cursor:pointer}
-        .btn-save:hover{background:#1D4ED8}
-        .cfm-o{position:fixed;inset:0;background:rgba(15,23,42,.5);z-index:2000;display:flex;align-items:center;justify-content:center}
-        .cfm-box{background:#fff;border-radius:14px;padding:26px;max-width:340px;width:calc(100% - 48px);box-shadow:0 20px 60px rgba(15,23,42,.2);text-align:center}
+        .btn-cancel{background:#fff;color:#475569;border:1.5px solid #E7EBF1;padding:9px 16px;border-radius:9px;font-size:13.5px;font-weight:600;cursor:pointer}
+        .btn-cancel:hover{background:#F8FAFC;border-color:#CBD5E1}
+        .btn-save{background:linear-gradient(135deg,#2F5EFF,#6C63FF);color:#fff;border:none;padding:9px 20px;border-radius:9px;font-size:13.5px;font-weight:600;cursor:pointer;box-shadow:0 4px 14px rgba(47,94,255,.28);transition:box-shadow .15s}
+        .btn-save:hover{box-shadow:0 6px 20px rgba(47,94,255,.4)}
+        .cfm-o{position:fixed;inset:0;background:rgba(11,18,32,.55);backdrop-filter:blur(4px);z-index:2000;display:flex;align-items:center;justify-content:center}
+        .cfm-box{background:#fff;border-radius:18px;padding:26px;max-width:340px;width:calc(100% - 48px);box-shadow:0 20px 60px rgba(24,39,75,.2);text-align:center}
         .cfm-ico{font-size:34px;margin-bottom:10px}
         .cfm-title{font-size:17px;font-weight:700;margin-bottom:6px}
         .cfm-text{font-size:14px;color:#64748B;margin-bottom:18px;line-height:1.5}
         .cfm-acts{display:flex;gap:10px;justify-content:center}
-        .toast{position:fixed;bottom:22px;right:22px;background:#0F172A;color:#fff;padding:11px 16px;border-radius:10px;font-size:13px;font-weight:500;box-shadow:0 8px 24px rgba(15,23,42,.2);z-index:3000}
+        .toast{position:fixed;bottom:22px;right:22px;background:#111827;color:#fff;padding:12px 17px;border-radius:12px;font-size:13px;font-weight:500;box-shadow:0 12px 32px rgba(15,23,42,.28);z-index:3000}
         .toast.ok{border-left:3px solid #22C55E}
         .toast.err{border-left:3px solid #EF4444}
         thead th.sa::after{content:' ▲'}
         thead th.sd::after{content:' ▼'}
         thead th.ns{cursor:default}
         thead th.ns:hover{background:#F8FAFC!important;color:#64748B!important}
-        .vl-btn{display:flex;align-items:center;justify-content:space-between;padding:8px 11px;border:1px solid #E2E8F0;border-radius:8px;font-size:14px;color:#0F172A;background:#F8FAFC;cursor:pointer;user-select:none;transition:all .15s}
-        .vl-btn:hover,.vl-btn.open{border-color:#2563EB;background:#fff}
-        .vl-btn.open{box-shadow:0 0 0 3px rgba(37,99,235,.1)}
+        .vl-btn{display:flex;align-items:center;justify-content:space-between;padding:9px 12px;border:1.5px solid #E7EBF1;border-radius:9px;font-size:14px;color:#0F172A;background:#F8FAFC;cursor:pointer;user-select:none;transition:all .15s}
+        .vl-btn:hover,.vl-btn.open{border-color:#2F5EFF;background:#fff}
+        .vl-btn.open{box-shadow:0 0 0 4px rgba(47,94,255,.12)}
         .vl-lbl{flex:1}.vl-lbl.ph{color:#94A3B8}
         .vl-caret{color:#94A3B8;font-size:10px;margin-left:6px;transition:transform .15s}
         .vl-btn.open .vl-caret{transform:rotate(180deg)}
@@ -628,40 +756,47 @@ export default function Pipeline() {
       `}</style>
 
       {/* Stats bar */}
-      <div style={{ background:'#fff', borderBottom:'1px solid #E2E8F0', padding:'0 0 0 0', display:'flex', overflowX:'auto', flexShrink:0 }}>
+      <div style={{ background:'transparent', padding:'20px 28px 6px', display:'flex', gap:12, overflowX:'auto', flexShrink:0 }}>
         {[
           ['UKUPNO', deals.length, 'unosa'],
           ['AKTIVNI', active, 'u pipelineu'],
-          ['PIPELINE', pipeline.toLocaleString('hr-HR') + ' €', 'EUR/mj procjena'],
-          ['PREGOVORI', byS['Pregovori'] || 0, 'aktivno'],
+          ['PIPELINE', pipeline.toLocaleString('hr-HR') + ' €', 'mj. + jednokratno, otvoreni'],
+          ['NA NAMA JE RED', naNama, 'čeka na naš odgovor'],
           ['PONUDA POSLANA', byS['Ponuda poslana'] || 0, 'čeka odgovor'],
+          ['DOBIVENO', dobivenoValue.toLocaleString('hr-HR') + ' €', (byS['Dobiveno']||0)+(byS['Ugovor potpisan']||0) + ' ugovora/dobiveno'],
           ['ZATVORENO', (byS['Izgubljeno']||0)+(byS['Diskvalificiran']||0), 'izgub. + diskvalif.'],
         ].map(([lbl, val, sub]) => (
-          <div key={lbl} style={{ padding:'13px 20px', borderRight:'1px solid #F1F5F9', display:'flex', flexDirection:'column', gap:3, whiteSpace:'nowrap', minWidth:130 }}>
+          <div key={lbl} className="pl-stat" style={{ padding:'16px 18px 17px', display:'flex', flexDirection:'column', gap:4, whiteSpace:'nowrap', minWidth:148 }}>
             <div style={{ fontSize:'10.5px', fontWeight:700, color:'#94A3B8', textTransform:'uppercase', letterSpacing:'.6px' }}>{lbl}</div>
-            <div style={{ fontSize:22, fontWeight:800, color:'#1D4ED8', lineHeight:1, letterSpacing:'-.5px' }}>{val}</div>
+            <div style={{ fontSize:21, fontWeight:800, color:'#0F172A', lineHeight:1, letterSpacing:'-.5px' }}>{val}</div>
             <div style={{ fontSize:11, color:'#94A3B8' }}>{sub}</div>
           </div>
         ))}
       </div>
 
       {/* Filters */}
-      <div style={{ background:'#F0F4F8', borderBottom:'1px solid #DDE3EA', padding:'10px 28px', display:'flex', alignItems:'center', gap:10, flexWrap:'wrap', flexShrink:0 }}>
+      <div style={{ background:'transparent', padding:'10px 28px', display:'flex', alignItems:'center', gap:10, flexWrap:'wrap', flexShrink:0 }}>
         <div style={{ position:'relative', flex:1, minWidth:200, maxWidth:290 }}>
           <span style={{ position:'absolute', left:10, top:'50%', transform:'translateY(-50%)', fontSize:13, color:'#94A3B8' }}>🔍</span>
           <input value={search} onChange={e => setSearch(e.target.value)}
             placeholder="Pretraži tvrtku, ime, e-mail…"
-            style={{ width:'100%', padding:'7px 12px 7px 33px', border:'1px solid #DDE3EA', borderRadius:8, fontSize:'13.5px', outline:'none', background:'#fff', color:'#0F172A' }} />
+            style={{ width:'100%', padding:'8px 12px 8px 33px', border:'1.5px solid #E7EBF1', borderRadius:9, fontSize:'13.5px', outline:'none', background:'#fff', color:'#0F172A' }} />
         </div>
         <select value={ownerF} onChange={e => setOwnerF(e.target.value)}
-          style={{ padding:'7px 12px', border:'1px solid #DDE3EA', borderRadius:8, fontSize:13, outline:'none', background:'#fff', cursor:'pointer', color:'#475569' }}>
+          style={{ padding:'8px 12px', border:'1.5px solid #E7EBF1', borderRadius:9, fontSize:13, outline:'none', background:'#fff', cursor:'pointer', color:'#475569' }}>
           <option value="">Svi vlasnici</option>
           {vlasnici.map(v => <option key={v}>{v}</option>)}
         </select>
         <select value={tipF} onChange={e => setTipF(e.target.value)}
-          style={{ padding:'7px 12px', border:'1px solid #DDE3EA', borderRadius:8, fontSize:13, outline:'none', background:'#fff', cursor:'pointer', color:'#475569' }}>
+          style={{ padding:'8px 12px', border:'1.5px solid #E7EBF1', borderRadius:9, fontSize:13, outline:'none', background:'#fff', cursor:'pointer', color:'#475569' }}>
           <option value="">Svi tipovi</option>
           {TIPOVI.map(t => <option key={t}>{t}</option>)}
+        </select>
+        <select value={potezuF} onChange={e => setPotezuF(e.target.value)}
+          style={{ padding:'8px 12px', border:'1.5px solid #E7EBF1', borderRadius:9, fontSize:13, outline:'none', background:'#fff', cursor:'pointer', color:'#475569' }}>
+          <option value="">Tko je na potezu (svi)</option>
+          <option value="mi">Na potezu: Mi</option>
+          <option value="klijent">Na potezu: Klijent</option>
         </select>
         <span style={{ fontSize:'11.5px', fontWeight:600, color:'#94A3B8', whiteSpace:'nowrap' }}>Status:</span>
         <div style={{ display:'flex', gap:5, flexWrap:'wrap' }}>
@@ -678,19 +813,19 @@ export default function Pipeline() {
         </div>
         <div style={{ marginLeft:'auto', display:'flex', gap:8 }}>
           <button onClick={exportCSV}
-            style={{ background:'rgba(255,255,255,.7)', color:'#475569', border:'1px solid #DDE3EA', padding:'7px 14px', borderRadius:8, fontSize:13, fontWeight:500, cursor:'pointer' }}>
+            style={{ background:'#fff', color:'#475569', border:'1.5px solid #E7EBF1', padding:'8px 15px', borderRadius:9, fontSize:13, fontWeight:600, cursor:'pointer' }}>
             ↓ CSV
           </button>
           <button onClick={() => setModal({})}
-            style={{ background:'#2563EB', color:'#fff', border:'none', padding:'8px 18px', borderRadius:8, fontSize:'13.5px', fontWeight:600, cursor:'pointer' }}>
+            style={{ background:'linear-gradient(135deg,#2F5EFF,#6C63FF)', color:'#fff', border:'none', padding:'9px 19px', borderRadius:9, fontSize:'13.5px', fontWeight:600, cursor:'pointer', boxShadow:'0 4px 14px rgba(47,94,255,.28)' }}>
             + Novi unos
           </button>
         </div>
       </div>
 
       {/* Table */}
-      <div style={{ flex:1, padding:'20px 28px', background:'#F0F4F8', display:'flex', flexDirection:'column', minHeight:0, overflow:'auto' }}>
-        <div style={{ background:'#fff', borderRadius:12, border:'1px solid #E2E8F0', boxShadow:'0 2px 8px rgba(15,23,42,.06)', flex:1, overflow:'auto', minHeight:0 }}>
+      <div style={{ flex:1, padding:'14px 28px 28px', background:'transparent', display:'flex', flexDirection:'column', minHeight:0, overflow:'auto' }}>
+        <div style={{ background:'#fff', borderRadius:18, border:'1px solid #EAEEF4', boxShadow:'0 6px 20px rgba(24,39,75,.08)', flex:1, overflow:'auto', minHeight:0 }}>
           <table style={{ width:'100%', borderCollapse:'collapse', minWidth:960 }}>
             <thead>
               <tr>
@@ -699,12 +834,14 @@ export default function Pipeline() {
                   ['Datum upita', 'datum_upita', null],
                   ['Tvrtka / Kontakt', 'tvrtka', null],
                   ['Tip usluge', 'tip_usluge', null],
+                  ['Zadnja komunikacija', 'zadnja_komunikacija', null],
+                  ['Na potezu', 'na_potezu', null],
                   ['Upitnik', null, null],
                   ['Ponuda', null, null],
                   ['Status', 'stage', null],
                   ['Vlasnik', 'vlasnik', null],
                   ['Sljedeći korak', null, null],
-                  ['Proc. vr. (EUR/mj)', 'value', null],
+                  ['Vrijednost', 'value', null],
                   ['Akcije', null, null],
                 ].map(([label, key, w]) => (
                   <th key={label}
@@ -721,7 +858,7 @@ export default function Pipeline() {
             </thead>
             <tbody>
               {sorted.length === 0 ? (
-                <tr><td colSpan={11}>
+                <tr><td colSpan={13}>
                   <div style={{ padding:'60px 24px', textAlign:'center', color:'#94A3B8' }}>
                     <div style={{ fontSize:40, marginBottom:12 }}>📋</div>
                     <h3 style={{ fontSize:16, fontWeight:600, color:'#475569', marginBottom:4 }}>Nema rezultata</h3>
@@ -729,22 +866,49 @@ export default function Pipeline() {
                   </div>
                 </td></tr>
               ) : sorted.map((d, i) => {
-                const vr = d.value ? Number(d.value).toLocaleString('hr-HR') + ' €' : '—';
+                const dv = dealValue(d);
+                const vr = dv ? Number(dv).toLocaleString('hr-HR') + (d.tip_posla === 'jednokratni' ? ' €' : ' €/mj') : '—';
                 const owCls = d.vlasnik === 'Wanda' ? 'ow' : d.vlasnik === 'Matija' ? 'om' : 'oo';
+                const days = daysSinceContact(d);
+                const mismatch = d.stage === 'Cekamo odgovor klijenta' && d.na_potezu === 'mi';
+                const oibReq = (OFFER_STAGES.has(d.stage) || d.ponuda_poslana) && !d.oib;
                 return (
                   <tr key={d.id} style={{ borderBottom:'1px solid #F1F5F9', transition:'background .12s' }}
                     onMouseEnter={e => e.currentTarget.style.background='#EFF6FF'}
                     onMouseLeave={e => e.currentTarget.style.background=''}>
-                    <td style={{ padding:'11px 14px', fontSize:'13.5px', verticalAlign:'middle', color:'#CBD5E1', fontSize:'11.5px', fontWeight:700 }}>{i+1}</td>
-                    <td style={{ padding:'11px 14px', fontSize:'13.5px', verticalAlign:'middle', color:'#64748B', fontSize:12, whiteSpace:'nowrap' }}>{d.datum_upita || '—'}</td>
+                    <td style={{ padding:'11px 14px', fontSize:'11.5px', verticalAlign:'middle', color:'#CBD5E1', fontWeight:700 }}>{i+1}</td>
+                    <td style={{ padding:'11px 14px', fontSize:12, verticalAlign:'middle', color:'#64748B', whiteSpace:'nowrap' }}>{d.datum_upita || '—'}</td>
                     <td style={{ padding:'11px 14px', fontSize:'13.5px', verticalAlign:'middle' }}>
                       {d.tvrtka && <div style={{ fontWeight:600, color:'#0F172A' }}>{d.tvrtka}</div>}
                       {d.ime_kontakta && <div style={{ color:'#64748B', fontSize:12, marginTop:2 }}>{d.ime_kontakta}</div>}
                       {!d.tvrtka && !d.ime_kontakta && <span style={{ color:'#94A3B8' }}>—</span>}
                       {d.email && <a href={`mailto:${d.email}`} style={{ color:'#2563EB', fontSize:11, display:'block', marginTop:2 }}>{d.email}</a>}
+                      {d.oib
+                        ? <div style={{ color:'#94A3B8', fontSize:10.5, marginTop:2 }}>OIB {d.oib}</div>
+                        : oibReq && <div style={{ color:'#DC2626', fontSize:10.5, marginTop:2, fontWeight:700 }}>⚠ OIB nedostaje</div>}
                     </td>
                     <td style={{ padding:'11px 14px', fontSize:'13.5px', verticalAlign:'middle' }}>
                       <span style={{ fontSize:12, color:'#475569' }}>{d.tip_usluge || '—'}</span>
+                    </td>
+                    <td style={{ padding:'11px 14px', fontSize:'13.5px', verticalAlign:'middle' }}>
+                      {days === null ? <span style={{ color:'#94A3B8' }}>—</span> : (
+                        <>
+                          <div style={{ fontSize:12, color: days > 14 ? '#DC2626' : days > 7 ? '#B45309' : '#475569', fontWeight:600 }}>
+                            {days} d {d.smjer_zadnje_komunikacije === 'mi_klijent' ? '→' : d.smjer_zadnje_komunikacije === 'klijent_mi' ? '←' : ''}
+                          </div>
+                          <div style={{ fontSize:10.5, color:'#94A3B8' }}>{d.datum_zadnje_komunikacije || d.datum_upita}</div>
+                        </>
+                      )}
+                    </td>
+                    <td style={{ padding:'11px 14px', fontSize:'13.5px', verticalAlign:'middle' }}>
+                      {d.na_potezu ? (
+                        <span className="ochip" style={{
+                          background: mismatch ? '#FEF2F2' : (d.na_potezu === 'mi' ? '#FFFBEB' : '#EFF6FF'),
+                          color: mismatch ? '#B91C1C' : (d.na_potezu === 'mi' ? '#B45309' : '#1D4ED8'),
+                        }} title={mismatch ? 'Status kaže "čekamo klijenta" ali je lopta kod nas' : ''}>
+                          {mismatch && '⚠ '}{NA_POTEZU_L[d.na_potezu]}
+                        </span>
+                      ) : <span style={{ color:'#94A3B8', fontSize:12 }}>—</span>}
                     </td>
                     <td style={{ padding:'11px 14px', fontSize:'13.5px', verticalAlign:'middle' }}>
                       <div style={{ display:'flex', flexDirection:'column', gap:3 }}>
